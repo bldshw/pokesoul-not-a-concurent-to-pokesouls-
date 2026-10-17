@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { POKEMON, MOVES, COMBOS } from '../data';
 
-type Foe = Phaser.Physics.Arcade.Sprite & { hp: number; wind: number; cd: number };
+type Foe = Phaser.Physics.Arcade.Sprite & { hp: number; max: number; wind: number; cd: number; boss?: boolean; mode?: string };
 const CAMP = { x: 200, y: 200 };
 const W = 1600, H = 1200;
 
@@ -14,6 +14,10 @@ export class Game extends Phaser.Scene {
   private cur = 0; private stamina = 100; private souls = 0;
   private rollT = 0; private atkCd = 0; private swapCd = 0; private stDelay = 0;
   private combo = { mult: 1, until: 0 };
+  private floor = 1;
+  private exit?: Phaser.GameObjects.Rectangle;
+  private tele?: Phaser.GameObjects.Arc;
+  private shots: { o: Phaser.GameObjects.Arc; vx: number; vy: number; life: number }[] = [];
   private stain?: { x: number; y: number; amount: number; spr: Phaser.GameObjects.Arc };
 
   private get mon() { return this.team[this.cur]; }
@@ -40,10 +44,14 @@ export class Game extends Phaser.Scene {
   }
 
   private spawnFoes() {
-    for (let i = 0; i < 7; i++) {
-      const f = this.foes.create(Phaser.Math.Between(500, W - 60), Phaser.Math.Between(80, H - 60), 'dot') as unknown as Foe;
-      f.hp = 30; f.wind = 0; f.cd = 1; f.setTint(0xc04060).setCollideWorldBounds(true);
-    }
+    const mk = (x: number, y: number, hp: number, boss = false) => {
+      const f = this.foes.create(x, y, 'dot') as unknown as Foe;
+      f.hp = f.max = hp; f.wind = 0; f.cd = 1; f.boss = boss;
+      f.setTint(boss ? 0x9a4dff : 0xc04060).setCollideWorldBounds(true);
+      if (boss) f.setScale(2.6);
+    };
+    if (this.floor % 3 === 0) { mk(W - 300, H / 2, 200 + this.floor * 40, true); return; }
+    for (let i = 0; i < 4 + this.floor; i++) mk(Phaser.Math.Between(500, W - 60), Phaser.Math.Between(80, H - 60), 25 + this.floor * 6);
   }
 
   private pop(x: number, y: number, txt: string, color = '#fff') {
@@ -84,7 +92,11 @@ export class Game extends Phaser.Scene {
 
   private hit(f: Foe, dmg: number, a: number) {
     f.hp -= dmg; f.setVelocity(Math.cos(a) * 220, Math.sin(a) * 220); this.pop(f.x, f.y, String(Math.round(dmg)), '#ff9');
-    if (f.hp <= 0) { this.souls += 20; f.destroy(); }
+    if (f.hp <= 0) {
+      this.souls += f.boss ? 100 * this.floor : 20;
+      if (f.boss) { this.tele?.destroy(); this.tele = undefined; this.pop(f.x, f.y, 'BOSS VAINCU', '#ffd34d'); }
+      f.destroy();
+    }
   }
 
   private hurt(dmg: number) {
@@ -107,7 +119,7 @@ export class Game extends Phaser.Scene {
 
   private rest() {
     this.team.forEach(t => (t.hp = this.maxHp(t))); this.stamina = 100;
-    this.foes.clear(true, true); this.spawnFoes();
+    this.clearField();
   }
 
   private upgrade() {
@@ -117,6 +129,39 @@ export class Game extends Phaser.Scene {
     const e = POKEMON[m.id].evolutions.find(ev => ev.level <= m.lvl);
     if (e) { m.id = e.to; m.hp = this.maxHp(m); this.pop(this.p.x, this.p.y, `ÉVOLUTION → ${POKEMON[e.to].name} !`, '#7df'); }
     this.p.setTint(POKEMON[m.id].color);
+  }
+
+  private clearField() {
+    this.foes.clear(true, true); this.exit?.destroy(); this.exit = undefined;
+    this.tele?.destroy(); this.tele = undefined;
+    this.shots.forEach(sh => sh.o.destroy()); this.shots = [];
+    this.spawnFoes();
+  }
+
+  private nextFloor() {
+    this.floor++; this.stain?.spr.destroy(); this.stain = undefined;
+    this.team.forEach(t => (t.hp = Math.min(this.maxHp(t), t.hp + this.maxHp(t) * 0.3)));
+    this.clearField(); this.p.setPosition(CAMP.x + 40, CAMP.y);
+    this.pop(this.p.x, this.p.y - 20, `ÉTAGE ${this.floor}${this.floor % 3 === 0 ? ' : BOSS' : ''}`, '#7df');
+  }
+
+  private fire(x: number, y: number, a: number) {
+    this.shots.push({ o: this.add.circle(x, y, 7, 0xb98cff), vx: Math.cos(a) * 170, vy: Math.sin(a) * 170, life: 4 });
+  }
+
+  private bossAI(f: Foe, s: number, dist: number) {
+    const rage = f.hp < f.max / 2;
+    if (f.wind > 0) {
+      f.wind -= s; f.setVelocity(0, 0);
+      if (f.wind <= 0) {
+        this.tele?.destroy(); this.tele = undefined; f.setTint(rage ? 0xff4d6d : 0x9a4dff); f.cd = rage ? 1 : 1.8;
+        if (f.mode === 'slam') { if (Phaser.Math.Distance.Between(f.x, f.y, this.p.x, this.p.y) < 130) this.hurt(28 + this.floor * 2); }
+        else { const n = rage ? 14 : 8; for (let i = 0; i < n; i++) this.fire(f.x, f.y, (i / n) * Math.PI * 2 + (rage ? 0.2 : 0)); }
+      }
+    } else if (f.cd <= 0) {
+      f.mode = dist < 170 ? 'slam' : 'ring'; f.wind = f.mode === 'slam' ? 0.9 : 0.6; f.setTint(0xffffff);
+      if (f.mode === 'slam') this.tele = this.add.circle(f.x, f.y, 130, 0xff3030, 0.3);
+    } else this.physics.moveToObject(f, this.p, rage ? 95 : 65);
   }
 
   update(_t: number, dt: number) {
@@ -144,6 +189,7 @@ export class Game extends Phaser.Scene {
     for (const o of [...this.foes.getChildren()]) {
       const f = o as Foe; if (!f.active) continue;
       const dist = Phaser.Math.Distance.Between(f.x, f.y, this.p.x, this.p.y); f.cd -= s;
+      if (f.boss) { this.bossAI(f, s, dist); continue; }
       if (f.wind > 0) {
         f.wind -= s; f.setVelocity(0, 0);
         if (f.wind <= 0) { f.setTint(0xc04060); f.cd = 1.2; if (dist < 56) this.hurt(14); }
@@ -152,10 +198,26 @@ export class Game extends Phaser.Scene {
       else f.setVelocity(0, 0);
     }
 
+    this.shots = this.shots.filter(sh => {
+      if (!sh.o.active) return false;
+      sh.o.x += sh.vx * s; sh.o.y += sh.vy * s; sh.life -= s;
+      const touch = Phaser.Math.Distance.Between(sh.o.x, sh.o.y, this.p.x, this.p.y) < 18;
+      if (touch) this.hurt(10 + this.floor * 2);
+      if (touch || sh.life <= 0) { sh.o.destroy(); return false; }
+      return true;
+    });
+    if (!this.exit && this.foes.countActive() === 0) {
+      this.exit = this.add.rectangle(W - 70, H / 2, 40, 90, 0x66ccff, 0.6);
+      this.pop(this.p.x, this.p.y, 'Sortie ouverte : va à droite, [E]', '#7df');
+    }
+    if (this.exit && Phaser.Math.Distance.Between(this.p.x, this.p.y, this.exit.x, this.exit.y) < 60
+      && Phaser.Input.Keyboard.JustDown(k.E)) this.nextFloor();
+    const b = this.foes.getChildren().find(o => (o as Foe).boss) as Foe | undefined;
     this.hud.setText([
       ...this.team.map((t, i) => `${i === this.cur ? '▶' : '  '}${i + 1} ${POKEMON[t.id].name} Nv${t.lvl}  ${Math.max(0, Math.ceil(t.hp))}/${Math.ceil(this.maxHp(t))}`),
-      `Endurance ${Math.floor(this.stamina)}   Âmes ${this.souls}`,
+      `Étage ${this.floor}   Endurance ${Math.floor(this.stamina)}   Âmes ${this.souls}`,
       near ? `[E] Se reposer (relance les ennemis)  [U] Monter de niveau (${this.mon.lvl * 50} âmes)` : '',
+      b ? 'BOSS ' + '█'.repeat(Math.max(0, Math.ceil(b.hp / b.max * 20))) : '',
     ].join('\n'));
   }
 }
